@@ -259,8 +259,6 @@ export default function App(): JSX.Element {
   const timerInitialized = useRef(false);
   const timerEndAtRef = useRef<number | null>(null);
   const phaseTimeoutRef = useRef<number | null>(null);
-  const loggedWorkMinutesRef = useRef(0);
-  const loggedWorkSecondsRef = useRef(0);
   const workBlockStartedAtRef = useRef<string | null>(null);
   const previousLevelRef = useRef<number>(character?.level ?? 1);
   const levelTrackingReadyRef = useRef(false);
@@ -360,35 +358,6 @@ export default function App(): JSX.Element {
       categoryId: linkedTask?.categoryId ?? taskCategory,
       label: linkedTask?.title ?? "Focus"
     };
-  };
-
-  const logPausedWorkSlice = async () => {
-    if (timerPhase !== "work") return;
-    const elapsedSeconds = Math.max(0, timerSettings.workMin * 60 - secondsLeft);
-    const deltaSeconds = Math.max(0, elapsedSeconds - loggedWorkSecondsRef.current);
-    const deltaMinutes = Math.max(0, Math.floor(deltaSeconds / 60));
-    if (deltaMinutes <= 0) return;
-
-    const { linkedTask, categoryId, label } = resolveFocusContext();
-    const now = new Date();
-    const startedAt = new Date(now.getTime() - deltaMinutes * 60 * 1000).toISOString();
-    const session: FocusSession = {
-      id: makeId(),
-      label,
-      taskId: linkedTask?.id,
-      categoryId,
-      startedAt,
-      endedAt: now.toISOString(),
-      durationMin: deltaMinutes,
-      rewardMinutes: 0,
-      type: "work",
-      completed: false
-    };
-
-    await addFocusSession(session, { applyRewards: false });
-    loggedWorkSecondsRef.current += deltaMinutes * 60;
-    loggedWorkMinutesRef.current += deltaMinutes;
-    setAnalyticsRefreshTick((prev) => prev + 1);
   };
 
   const clearPhaseTimeout = () => {
@@ -507,10 +476,8 @@ export default function App(): JSX.Element {
       if (timerPhase === "work") {
         const { linkedTask, categoryId, label } = resolveFocusContext();
         const now = new Date();
-        const elapsedSeconds = Math.max(0, timerSettings.workMin * 60 - secondsLeft);
-        const deltaSeconds = Math.max(0, elapsedSeconds - loggedWorkSecondsRef.current);
-        const deltaMinutes = Math.max(0, Math.floor(deltaSeconds / 60));
-        const startedAt = new Date(now.getTime() - deltaMinutes * 60 * 1000).toISOString();
+        const completedMinutes = timerSettings.workMin;
+        const startedAt = new Date(now.getTime() - completedMinutes * 60 * 1000).toISOString();
         const session: FocusSession = {
           id: makeId(),
           label,
@@ -518,18 +485,14 @@ export default function App(): JSX.Element {
           categoryId,
           startedAt,
           endedAt: now.toISOString(),
-          durationMin: deltaMinutes,
-          rewardMinutes: deltaMinutes,
+          durationMin: completedMinutes,
+          rewardMinutes: completedMinutes,
           type: "work",
           completed: true
         };
-        if (deltaMinutes > 0) {
-          await addFocusSession(session);
-          setAnalyticsRefreshTick((prev) => prev + 1);
-        }
+        await addFocusSession(session);
+        setAnalyticsRefreshTick((prev) => prev + 1);
         notifyPhaseEnd("Work session complete", "Time for a break.");
-        loggedWorkSecondsRef.current = 0;
-        loggedWorkMinutesRef.current = 0;
         workBlockStartedAtRef.current = null;
 
         const nextSessionCount = sessionCount + 1;
@@ -544,8 +507,6 @@ export default function App(): JSX.Element {
       }
 
       notifyPhaseEnd("Break complete", "Ready to start your next focus session.");
-      loggedWorkSecondsRef.current = 0;
-      loggedWorkMinutesRef.current = 0;
       workBlockStartedAtRef.current = null;
       setTimerPhase("work");
       setSecondsLeft(timerSettings.workMin * 60);
@@ -855,8 +816,6 @@ export default function App(): JSX.Element {
     setSecondsLeft(timerSettings.workMin * 60);
     timerEndAtRef.current = null;
     clearPhaseTimeout();
-    loggedWorkSecondsRef.current = 0;
-    loggedWorkMinutesRef.current = 0;
     workBlockStartedAtRef.current = null;
   };
 
@@ -865,8 +824,6 @@ export default function App(): JSX.Element {
     setTimerRunning(false);
     timerEndAtRef.current = null;
     clearPhaseTimeout();
-    loggedWorkSecondsRef.current = 0;
-    loggedWorkMinutesRef.current = 0;
     workBlockStartedAtRef.current = null;
     setTimerPhase("break");
     setSecondsLeft(timerSettings.breakMin * 60);
@@ -877,9 +834,6 @@ export default function App(): JSX.Element {
       setTimerRunning(false);
       timerEndAtRef.current = null;
       clearPhaseTimeout();
-      if (timerPhase === "work") {
-        void logPausedWorkSlice();
-      }
       return;
     }
 
@@ -898,16 +852,11 @@ export default function App(): JSX.Element {
   };
 
   const resetFocusTimer = () => {
-    if (timerRunning && timerPhase === "work") {
-      void logPausedWorkSlice();
-    }
     setTimerRunning(false);
     setTimerPhase("work");
     setSecondsLeft(timerSettings.workMin * 60);
     timerEndAtRef.current = null;
     clearPhaseTimeout();
-    loggedWorkSecondsRef.current = 0;
-    loggedWorkMinutesRef.current = 0;
     workBlockStartedAtRef.current = null;
   };
 
