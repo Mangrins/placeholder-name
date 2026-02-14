@@ -57,6 +57,7 @@ export interface FocusSession {
   startedAt: string;
   endedAt?: string;
   durationMin: number;
+  rewardMinutes?: number;
   type: "work" | "break" | "long_break";
   completed: boolean;
 }
@@ -153,6 +154,7 @@ export interface AppSettings {
     longBreakMin: number;
     everyN: number;
   };
+  themeId?: "neon" | "pastel_light" | "monochrome" | "ember" | "oceanic" | "medieval";
   staminaEnabled: boolean;
   audioEnabled: boolean;
   reducedMotion: boolean;

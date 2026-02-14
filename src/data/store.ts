@@ -55,7 +55,7 @@ interface AppState {
   updateSettings: (patch: Partial<AppSettings>) => Promise<void>;
   updateTimerSettings: (patch: Partial<AppSettings["timer"]>) => Promise<void>;
   resetLifetimeXp: () => Promise<void>;
-  addFocusSession: (session: FocusSession) => Promise<void>;
+  addFocusSession: (session: FocusSession, options?: { applyRewards?: boolean }) => Promise<void>;
   appendEvent: (event: Omit<AppEvent, "eventId" | "occurredAt" | "schemaVersion">) => Promise<void>;
 }
 
@@ -149,7 +149,7 @@ async function syncQuestProgress(): Promise<Quest[]> {
   const completedTasks = tasks.filter((task) => task.status === "done");
   const completedTaskCount = completedTasks.length;
   const completedFocusMinutes = sessions
-    .filter((session) => session.completed && session.type === "work")
+    .filter((session) => session.type === "work")
     .reduce((sum, session) => sum + session.durationMin, 0);
 
   const completedByCategory = completedTasks.reduce<Record<string, number>>((acc, task) => {
@@ -198,7 +198,7 @@ async function syncAchievementProgress(): Promise<Record<string, AchievementProg
   const progressMap = toProgressRecord(progressRows);
   const completedTasks = tasks.filter((task) => task.status === "done").length;
   const focusMinutesTotal = sessions
-    .filter((session) => session.completed && session.type === "work")
+    .filter((session) => session.type === "work")
     .reduce((sum, session) => sum + session.durationMin, 0);
   const taskStreak = streak?.taskDays ?? 0;
 
@@ -529,11 +529,23 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ character: next });
   },
 
-  addFocusSession: async (session) => {
+  addFocusSession: async (session, options) => {
     const profile = get().profile;
     if (!profile) return;
 
     await db.focusSessions.add(session);
+    if (options?.applyRewards === false) {
+      if (session.type === "work") {
+        await upsertDailyAggregate(
+          session.endedAt ?? session.startedAt,
+          { focusMinutes: session.durationMin },
+          session.categoryId,
+          session.durationMin
+        );
+      }
+      return;
+    }
+
     await recordFocusSessionEnd(profile.userId, session);
 
     const [character, streaks, quests, achievementProgress] = await Promise.all([

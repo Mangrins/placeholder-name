@@ -92,19 +92,24 @@ export async function recordFocusSessionEnd(userId: string, session: FocusSessio
   const streak = (await db.streaks.get("main")) ?? { id: "main", taskDays: 0, focusDays: 0 };
   if (!character) return;
 
-  const xp = calculateFocusXp(session.durationMin, streak.focusDays);
-  const next = { ...applyXp(character, xp), id: character.id };
-  await db.character.put(next);
+  const rewardMinutes = Math.max(0, Math.round(session.rewardMinutes ?? session.durationMin));
+  const xp = session.completed && rewardMinutes > 0 ? calculateFocusXp(rewardMinutes, streak.focusDays) : 0;
+  if (xp > 0) {
+    const next = { ...applyXp(character, xp), id: character.id };
+    await db.character.put(next);
+  }
 
-  const today = format(new Date(), "yyyy-MM-dd");
-  const updatedStreak = updateFocusStreak(streak, today);
-  await db.streaks.put({ id: "main", ...updatedStreak });
+  if (session.completed) {
+    const today = format(new Date(), "yyyy-MM-dd");
+    const updatedStreak = updateFocusStreak(streak, today);
+    await db.streaks.put({ id: "main", ...updatedStreak });
+  }
 
   await appendEvent(userId, "FocusSessionEnded", {
     sessionId: session.id,
     taskId: session.taskId,
     categoryId: session.categoryId,
-    minutes: session.durationMin,
+    minutes: rewardMinutes,
     xp
   });
 

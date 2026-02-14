@@ -5,7 +5,8 @@ import { useAppStore } from "./data/store";
 import { getWeeklyTrends, getYearHeatmap } from "./analytics/selectors";
 import { completionRateOnFocusDays, peakDayDistribution, peakHourDistribution } from "./analytics/projections";
 import { buildSnapshot, todayRange } from "./snapshot/buildSnapshot";
-import type { FocusSession, Quest, Task, TaskCompletionReward, TaskSubtask } from "./domain/types";
+import { xpToNext } from "./domain/progression";
+import type { AppSettings, FocusSession, Quest, Task, TaskCompletionReward, TaskSubtask } from "./domain/types";
 
 type TabId =
   | "dashboard"
@@ -61,6 +62,15 @@ const timerPresets = [
   { name: "Power 50/10", work: 50, break: 10, longBreak: 20, everyN: 3 },
   { name: "Deep 90/20", work: 90, break: 20, longBreak: 30, everyN: 2 }
 ] as const;
+
+const themeOptions: Array<{ id: NonNullable<AppSettings["themeId"]>; label: string }> = [
+  { id: "neon", label: "Neon (current)" },
+  { id: "pastel_light", label: "Pastel Light" },
+  { id: "monochrome", label: "Monochrome (B/W)" },
+  { id: "ember", label: "Ember Forge" },
+  { id: "oceanic", label: "Oceanic" },
+  { id: "medieval", label: "Medieval Manuscript" }
+];
 
 const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -195,6 +205,7 @@ export default function App(): JSX.Element {
     addFocusSession,
     createQuest,
     updateQuest,
+    updateSettings,
     updateTimerSettings,
     resetLifetimeXp
   } = useAppStore();
@@ -218,7 +229,7 @@ export default function App(): JSX.Element {
   const [sessionCount, setSessionCount] = useState(0);
   const [focusExpanded, setFocusExpanded] = useState(false);
   const [focusTaskId, setFocusTaskId] = useState("");
-  const [focusLabel, setFocusLabel] = useState("General Focus");
+  const [selectedHeatCell, setSelectedHeatCell] = useState<{ date: string; minutes: number } | null>(null);
 
   const [customWork, setCustomWork] = useState(25);
   const [customBreak, setCustomBreak] = useState(5);
@@ -242,8 +253,17 @@ export default function App(): JSX.Element {
   const [commandOpen, setCommandOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
   const [taskCompletionFeedback, setTaskCompletionFeedback] = useState("");
+  const [analyticsRefreshTick, setAnalyticsRefreshTick] = useState(0);
+  const [levelUpFeedback, setLevelUpFeedback] = useState("");
 
   const timerInitialized = useRef(false);
+  const timerEndAtRef = useRef<number | null>(null);
+  const phaseTimeoutRef = useRef<number | null>(null);
+  const loggedWorkMinutesRef = useRef(0);
+  const loggedWorkSecondsRef = useRef(0);
+  const workBlockStartedAtRef = useRef<string | null>(null);
+  const previousLevelRef = useRef<number>(character?.level ?? 1);
+  const levelTrackingReadyRef = useRef(false);
 
   const timerSettings = settings?.timer ?? {
     workMin: 25,
@@ -251,10 +271,148 @@ export default function App(): JSX.Element {
     longBreakMin: 15,
     everyN: 4
   };
+  const activeThemeId = settings?.themeId ?? "neon";
+  const immersiveFocusMode = activeTab === "focus" && timerRunning && timerPhase === "work";
+
+  const ensureNotificationPermission = async () => {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    if (Notification.permission === "default") {
+      try {
+        await Notification.requestPermission();
+      } catch {
+        // Ignore permission errors and fall back to sound only.
+      }
+    }
+  };
+
+  const playPhaseAlarm = () => {
+    try {
+      const AudioCtx = (window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext);
+      if (!AudioCtx) return;
+      const audio = new AudioCtx();
+      const master = audio.createGain();
+      master.gain.value = 0.05;
+      master.connect(audio.destination);
+
+      [0, 0.24, 0.48].forEach((offset) => {
+        const osc = audio.createOscillator();
+        const gain = audio.createGain();
+        osc.type = "triangle";
+        osc.frequency.value = 860;
+        gain.gain.setValueAtTime(0.0001, audio.currentTime + offset);
+        gain.gain.exponentialRampToValueAtTime(0.2, audio.currentTime + offset + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + offset + 0.18);
+        osc.connect(gain);
+        gain.connect(master);
+        osc.start(audio.currentTime + offset);
+        osc.stop(audio.currentTime + offset + 0.22);
+      });
+    } catch {
+      // Ignore audio API failures.
+    }
+  };
+
+  const playLevelUpAlarm = () => {
+    try {
+      const AudioCtx = (window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext);
+      if (!AudioCtx) return;
+      const audio = new AudioCtx();
+      const master = audio.createGain();
+      master.gain.value = 0.06;
+      master.connect(audio.destination);
+
+      const notes = [523, 659, 784, 1046];
+      notes.forEach((frequency, idx) => {
+        const osc = audio.createOscillator();
+        const gain = audio.createGain();
+        osc.type = "sine";
+        osc.frequency.value = frequency;
+        const start = audio.currentTime + idx * 0.1;
+        gain.gain.setValueAtTime(0.0001, start);
+        gain.gain.exponentialRampToValueAtTime(0.24, start + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.18);
+        osc.connect(gain);
+        gain.connect(master);
+        osc.start(start);
+        osc.stop(start + 0.2);
+      });
+    } catch {
+      // Ignore audio API failures.
+    }
+  };
+
+  const notifyPhaseEnd = (title: string, body: string) => {
+    playPhaseAlarm();
+    if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+      try {
+        const notification = new Notification(title, { body, tag: "pomodoro-phase-end", requireInteraction: true });
+        window.setTimeout(() => notification.close(), 12000);
+      } catch {
+        // Ignore notification errors.
+      }
+    }
+  };
+
+  const resolveFocusContext = () => {
+    const linkedTask = tasks.find((task) => task.id === focusTaskId);
+    return {
+      linkedTask,
+      categoryId: linkedTask?.categoryId ?? taskCategory,
+      label: linkedTask?.title ?? "Focus"
+    };
+  };
+
+  const logPausedWorkSlice = async () => {
+    if (timerPhase !== "work") return;
+    const elapsedSeconds = Math.max(0, timerSettings.workMin * 60 - secondsLeft);
+    const deltaSeconds = Math.max(0, elapsedSeconds - loggedWorkSecondsRef.current);
+    const deltaMinutes = Math.max(0, Math.floor(deltaSeconds / 60));
+    if (deltaMinutes <= 0) return;
+
+    const { linkedTask, categoryId, label } = resolveFocusContext();
+    const now = new Date();
+    const startedAt = new Date(now.getTime() - deltaMinutes * 60 * 1000).toISOString();
+    const session: FocusSession = {
+      id: makeId(),
+      label,
+      taskId: linkedTask?.id,
+      categoryId,
+      startedAt,
+      endedAt: now.toISOString(),
+      durationMin: deltaMinutes,
+      rewardMinutes: 0,
+      type: "work",
+      completed: false
+    };
+
+    await addFocusSession(session, { applyRewards: false });
+    loggedWorkSecondsRef.current += deltaMinutes * 60;
+    loggedWorkMinutesRef.current += deltaMinutes;
+    setAnalyticsRefreshTick((prev) => prev + 1);
+  };
+
+  const clearPhaseTimeout = () => {
+    if (phaseTimeoutRef.current !== null) {
+      window.clearTimeout(phaseTimeoutRef.current);
+      phaseTimeoutRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (phaseTimeoutRef.current !== null) {
+        window.clearTimeout(phaseTimeoutRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     void init();
   }, [init]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", activeThemeId);
+  }, [activeThemeId]);
 
   useEffect(() => {
     if (!ready || timerInitialized.current) return;
@@ -285,13 +443,18 @@ export default function App(): JSX.Element {
     if (ready) {
       void run();
     }
-  }, [ready, tasks, quests, character]);
+  }, [ready, tasks, quests, character, analyticsRefreshTick]);
 
   useEffect(() => {
-    if (!timerRunning || secondsLeft <= 0) return;
+    if (!timerRunning) return;
+    if (timerEndAtRef.current === null) {
+      timerEndAtRef.current = Date.now() + secondsLeft * 1000;
+    }
     const id = window.setInterval(() => {
-      setSecondsLeft((prev) => Math.max(0, prev - 1));
-    }, 1000);
+      if (timerEndAtRef.current === null) return;
+      const next = Math.max(0, Math.ceil((timerEndAtRef.current - Date.now()) / 1000));
+      setSecondsLeft((prev) => (prev === next ? prev : next));
+    }, 250);
     return () => window.clearInterval(id);
   }, [secondsLeft, timerRunning]);
 
@@ -304,26 +467,70 @@ export default function App(): JSX.Element {
   }, [taskCompletionFeedback]);
 
   useEffect(() => {
+    const currentLevel = character?.level ?? 1;
+    if (!levelTrackingReadyRef.current) {
+      previousLevelRef.current = currentLevel;
+      levelTrackingReadyRef.current = true;
+      return;
+    }
+    if (currentLevel > previousLevelRef.current) {
+      const rank = rankFromLevel(currentLevel);
+      setLevelUpFeedback(`Level up! You are now level ${currentLevel} (${rank})`);
+      playLevelUpAlarm();
+      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+        try {
+          const notification = new Notification("Level Up", {
+            body: `Reached level ${currentLevel} • ${rank}`,
+            tag: "level-up"
+          });
+          window.setTimeout(() => notification.close(), 7000);
+        } catch {
+          // Ignore notification errors.
+        }
+      }
+    }
+    previousLevelRef.current = currentLevel;
+  }, [character?.level]);
+
+  useEffect(() => {
+    if (!levelUpFeedback) return;
+    const timeout = window.setTimeout(() => {
+      setLevelUpFeedback("");
+    }, 3800);
+    return () => window.clearTimeout(timeout);
+  }, [levelUpFeedback]);
+
+  useEffect(() => {
     if (!timerRunning || secondsLeft !== 0) return;
 
     const finishPhase = async () => {
       if (timerPhase === "work") {
-        const linkedTask = tasks.find((task) => task.id === focusTaskId);
-        const categoryId = linkedTask?.categoryId ?? taskCategory;
+        const { linkedTask, categoryId, label } = resolveFocusContext();
         const now = new Date();
-        const startedAt = new Date(now.getTime() - timerSettings.workMin * 60 * 1000).toISOString();
+        const elapsedSeconds = Math.max(0, timerSettings.workMin * 60 - secondsLeft);
+        const deltaSeconds = Math.max(0, elapsedSeconds - loggedWorkSecondsRef.current);
+        const deltaMinutes = Math.max(0, Math.floor(deltaSeconds / 60));
+        const startedAt = new Date(now.getTime() - deltaMinutes * 60 * 1000).toISOString();
         const session: FocusSession = {
           id: makeId(),
-          label: focusLabel.trim() || "General Focus",
+          label,
           taskId: linkedTask?.id,
           categoryId,
           startedAt,
           endedAt: now.toISOString(),
-          durationMin: timerSettings.workMin,
+          durationMin: deltaMinutes,
+          rewardMinutes: deltaMinutes,
           type: "work",
           completed: true
         };
-        await addFocusSession(session);
+        if (deltaMinutes > 0) {
+          await addFocusSession(session);
+          setAnalyticsRefreshTick((prev) => prev + 1);
+        }
+        notifyPhaseEnd("Work session complete", "Time for a break.");
+        loggedWorkSecondsRef.current = 0;
+        loggedWorkMinutesRef.current = 0;
+        workBlockStartedAtRef.current = null;
 
         const nextSessionCount = sessionCount + 1;
         setSessionCount(nextSessionCount);
@@ -331,19 +538,29 @@ export default function App(): JSX.Element {
         setTimerPhase(useLongBreak ? "long_break" : "break");
         setSecondsLeft((useLongBreak ? timerSettings.longBreakMin : timerSettings.breakMin) * 60);
         setTimerRunning(false);
+        timerEndAtRef.current = null;
+        clearPhaseTimeout();
         return;
       }
 
+      notifyPhaseEnd("Break complete", "Ready to start your next focus session.");
+      loggedWorkSecondsRef.current = 0;
+      loggedWorkMinutesRef.current = 0;
+      workBlockStartedAtRef.current = null;
       setTimerPhase("work");
       setSecondsLeft(timerSettings.workMin * 60);
       setTimerRunning(false);
+      timerEndAtRef.current = null;
+      clearPhaseTimeout();
     };
 
     void finishPhase();
   }, [
     addFocusSession,
-    focusLabel,
+    clearPhaseTimeout,
     focusTaskId,
+    notifyPhaseEnd,
+    resolveFocusContext,
     secondsLeft,
     sessionCount,
     taskCategory,
@@ -388,6 +605,9 @@ export default function App(): JSX.Element {
   }, [commandOpen, setActiveTab]);
 
   const level = character?.level ?? 1;
+  const xpCurrent = character?.xpCurrent ?? 0;
+  const xpNeeded = xpToNext(level);
+  const xpProgress = xpNeeded > 0 ? Math.max(0, Math.min(100, Math.round((xpCurrent / xpNeeded) * 100))) : 0;
   const filteredTasks = useMemo(() => {
     const q = taskSearch.trim().toLowerCase();
     const scoped = tasks.filter((task) => taskInFilter(task, taskFilter));
@@ -452,7 +672,7 @@ export default function App(): JSX.Element {
   const ringProgressRatio =
     phaseTotalSeconds > 0 ? Math.max(0, Math.min(1, (phaseTotalSeconds - secondsLeft) / phaseTotalSeconds)) : 0;
   const ringProgressDeg = `${Math.round(ringProgressRatio * 360)}deg`;
-  const isFocusCollapsed = timerRunning && !focusExpanded;
+  const isFocusCollapsed = immersiveFocusMode && !focusExpanded;
 
   const openTasks = tasks.filter((task) => task.status !== "done");
   const weeklyFocusPeak = Math.max(1, ...weeklyTrend.map((item) => item.focus));
@@ -633,20 +853,62 @@ export default function App(): JSX.Element {
     setTimerPhase("work");
     setTimerRunning(false);
     setSecondsLeft(timerSettings.workMin * 60);
+    timerEndAtRef.current = null;
+    clearPhaseTimeout();
+    loggedWorkSecondsRef.current = 0;
+    loggedWorkMinutesRef.current = 0;
+    workBlockStartedAtRef.current = null;
+  };
+
+  const skipWork = () => {
+    if (timerPhase !== "work") return;
+    setTimerRunning(false);
+    timerEndAtRef.current = null;
+    clearPhaseTimeout();
+    loggedWorkSecondsRef.current = 0;
+    loggedWorkMinutesRef.current = 0;
+    workBlockStartedAtRef.current = null;
+    setTimerPhase("break");
+    setSecondsLeft(timerSettings.breakMin * 60);
   };
 
   const toggleFocusTimer = () => {
-    setTimerRunning((prev) => {
-      const next = !prev;
-      if (next) setFocusExpanded(false);
-      return next;
-    });
+    if (timerRunning) {
+      setTimerRunning(false);
+      timerEndAtRef.current = null;
+      clearPhaseTimeout();
+      if (timerPhase === "work") {
+        void logPausedWorkSlice();
+      }
+      return;
+    }
+
+    if (timerPhase === "work" && !workBlockStartedAtRef.current) {
+      workBlockStartedAtRef.current = new Date().toISOString();
+    }
+
+    timerEndAtRef.current = Date.now() + secondsLeft * 1000;
+    clearPhaseTimeout();
+    phaseTimeoutRef.current = window.setTimeout(() => {
+      setSecondsLeft(0);
+    }, secondsLeft * 1000);
+    setFocusExpanded(false);
+    setTimerRunning(true);
+    void ensureNotificationPermission();
   };
 
   const resetFocusTimer = () => {
+    if (timerRunning && timerPhase === "work") {
+      void logPausedWorkSlice();
+    }
     setTimerRunning(false);
     setTimerPhase("work");
     setSecondsLeft(timerSettings.workMin * 60);
+    timerEndAtRef.current = null;
+    clearPhaseTimeout();
+    loggedWorkSecondsRef.current = 0;
+    loggedWorkMinutesRef.current = 0;
+    workBlockStartedAtRef.current = null;
   };
 
   const submitQuest = async () => {
@@ -705,11 +967,7 @@ export default function App(): JSX.Element {
         keywords: "focus timer pause start",
         run: () => {
           setActiveTab("focus");
-          setTimerRunning((prev) => {
-            const next = !prev;
-            if (next) setFocusExpanded(false);
-            return next;
-          });
+          toggleFocusTimer();
           setCommandOpen(false);
         }
       },
@@ -725,6 +983,17 @@ export default function App(): JSX.Element {
         }
       },
       {
+        id: "skip-work",
+        label: "Skip current work block",
+        section: "Actions",
+        keywords: "skip work block",
+        run: () => {
+          setActiveTab("focus");
+          skipWork();
+          setCommandOpen(false);
+        }
+      },
+      {
         id: "snapshot",
         label: "Build snapshot preview",
         section: "Utilities",
@@ -736,7 +1005,7 @@ export default function App(): JSX.Element {
         }
       }
     ];
-  }, [timerRunning]);
+  }, [timerRunning, toggleFocusTimer]);
 
   const filteredCommands = useMemo(() => {
     const q = commandQuery.trim().toLowerCase();
@@ -758,13 +1027,23 @@ export default function App(): JSX.Element {
     <div className="app-shell">
       <aside className="left-nav">
         <div className="brand">RPG Productivity</div>
-        <div className="profile-block">
-          <div className="avatar" aria-hidden="true" />
-          <div>
-            <div className="name">{profile?.displayName}</div>
-            <div className="muted">{rankFromLevel(level)}</div>
+        {!immersiveFocusMode && (
+          <div className="profile-block">
+            <div className="avatar" aria-hidden="true" />
+            <div>
+              <div className="name">{profile?.displayName}</div>
+              <div className="muted">{rankFromLevel(level)}</div>
+              <div className="xp-mini">
+                <div className="xp-mini-track">
+                  <span style={{ width: `${xpProgress}%` }} />
+                </div>
+                <small>
+                  XP {xpCurrent}/{xpNeeded}
+                </small>
+              </div>
+            </div>
           </div>
-        </div>
+        )}
 
         <nav>
           {tabItems.map((tab) => (
@@ -802,36 +1081,59 @@ export default function App(): JSX.Element {
           </motion.section>
         )}
 
-        <motion.section
-          className="panel hero"
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3 }}
-        >
-          <div>
-            <h1>{profile?.title}</h1>
-            <p>
-              Level {level} • Prestige {character?.prestigeRank ?? 0} • Lifetime XP {character?.xpLifetime ?? 0}
-            </p>
-          </div>
-          {activeTab !== "focus" && (
-            <div className="stat-grid stat-grid-upgraded">
-              {Object.entries(character?.stats ?? {}).map(([stat, value]) => (
-                <div className="chip stat-chip" key={stat}>
-                  <div className="stat-chip-head">
-                    <span className="stat-chip-label">{statMeta[stat]?.label ?? stat}</span>
-                  </div>
-                  <div className="stat-chip-value-row">
-                    <strong className="stat-chip-value">{value}</strong>
-                    <span className="stat-chip-icon" aria-hidden="true">
-                      {statMeta[stat]?.icon ?? "◈"}
-                    </span>
-                  </div>
+        {levelUpFeedback && (
+          <motion.section
+            className="panel reward-banner levelup-banner"
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.2 }}
+          >
+            <strong>LEVEL UP</strong>
+            <span>{levelUpFeedback}</span>
+          </motion.section>
+        )}
+
+        {!immersiveFocusMode && (
+          <motion.section
+            className="panel hero"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3 }}
+          >
+            <div>
+              <h1>{profile?.title}</h1>
+              <p>
+                Level {level} • Prestige {character?.prestigeRank ?? 0} • Lifetime XP {character?.xpLifetime ?? 0}
+              </p>
+              <div className="xp-mini hero-xp">
+                <div className="xp-mini-track">
+                  <span style={{ width: `${xpProgress}%` }} />
                 </div>
-              ))}
+                <small>
+                  Rank XP {xpCurrent}/{xpNeeded}
+                </small>
+              </div>
             </div>
-          )}
-        </motion.section>
+            {activeTab !== "focus" && (
+              <div className="stat-grid stat-grid-upgraded">
+                {Object.entries(character?.stats ?? {}).map(([stat, value]) => (
+                  <div className="chip stat-chip" key={stat}>
+                    <div className="stat-chip-head">
+                      <span className="stat-chip-label">{statMeta[stat]?.label ?? stat}</span>
+                    </div>
+                    <div className="stat-chip-value-row">
+                      <strong className="stat-chip-value">{value}</strong>
+                      <span className="stat-chip-icon" aria-hidden="true">
+                        {statMeta[stat]?.icon ?? "◈"}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </motion.section>
+        )}
 
         {activeTab === "dashboard" && (
           <section className="panel-grid">
@@ -1006,8 +1308,8 @@ export default function App(): JSX.Element {
 
         {activeTab === "focus" && (
           <section className={isFocusCollapsed ? "panel-grid focus-layout focus-layout-collapsed" : "panel-grid focus-layout"}>
-            <article className="panel focus-hero">
-              <h3>Pomodoro Nexus</h3>
+            <article className={immersiveFocusMode ? "panel focus-hero focus-hero-immersive" : "panel focus-hero"}>
+              {!immersiveFocusMode && <h3 className="focus-title">Pomodoro Nexus</h3>}
               <div className={isFocusCollapsed ? "focus-core focus-core-collapsed" : "focus-core"}>
                 <div
                   className={timerRunning ? "focus-ring-shell running" : "focus-ring-shell"}
@@ -1027,26 +1329,28 @@ export default function App(): JSX.Element {
                   <div className="focus-ring-progress" />
                   <div className="focus-ring-core">
                     <span className="focus-ring-time">{formatSeconds(secondsLeft)}</span>
-                  </div>
-                </div>
-                {!isFocusCollapsed && (
-                  <div className="focus-main">
-                    <div className="focus-phase-line">
-                      Phase: <strong>{timerPhase.replace("_", " ")}</strong> • Linked: <strong>{focusTaskId ? "Task linked" : "General focus"}</strong>
-                    </div>
-                    <div className="focus-phase-line">
-                      Today: <strong>{weeklyTrend[weeklyTrend.length - 1]?.focus ?? 0} min</strong> • Cycles: <strong>{sessionCount}</strong> (long break every {timerSettings.everyN})
-                    </div>
-                    <div className="focus-inline-actions">
-                      <button className="focus-action" onClick={toggleFocusTimer}>
+                    <div className="focus-ring-actions">
+                      <button
+                        className="focus-action"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          toggleFocusTimer();
+                        }}
+                      >
                         {timerRunning ? "Pause" : "Start"}
                       </button>
-                      <button className="focus-action ghost" onClick={resetFocusTimer}>
+                      <button
+                        className="focus-action ghost"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          resetFocusTimer();
+                        }}
+                      >
                         Reset
                       </button>
                     </div>
                   </div>
-                )}
+                </div>
                 {isFocusCollapsed && (
                   <div className="focus-collapsed-cta">
                     <button className="focus-action ghost" onClick={() => setFocusExpanded(true)}>
@@ -1060,18 +1364,21 @@ export default function App(): JSX.Element {
                 <>
                   <div className="divider" />
 
-                  <div className="row wrap" style={{ marginTop: "0.5rem" }}>
-                    <span className="badge">Peak hour {String(peakHourIndex).padStart(2, "0")}:00</span>
-                    <span className="badge">Sessions {sessionCount}</span>
+                  <div className="row wrap focus-skip-actions" style={{ marginTop: "0.5rem" }}>
+                    <button className="small ghost" disabled={timerPhase !== "work"} onClick={skipWork}>
+                      Skip work
+                    </button>
                     <button className="small ghost" disabled={timerPhase === "work"} onClick={skipBreak}>
                       Skip break
                     </button>
-                    {timerRunning && (
+                  </div>
+                  {timerRunning && (
+                    <div className="row wrap focus-skip-actions" style={{ marginTop: "0.4rem" }}>
                       <button className="small ghost" onClick={() => setFocusExpanded(false)}>
                         Collapse to timer
                       </button>
-                    )}
-                  </div>
+                    </div>
+                  )}
 
                   <div className="divider" />
 
@@ -1087,8 +1394,6 @@ export default function App(): JSX.Element {
                       </div>
                     </div>
                     <div className="focus-pane">
-                      <label className="label">Session label</label>
-                      <input value={focusLabel} onChange={(event) => setFocusLabel(event.target.value)} placeholder="Deep work: chapter draft" />
                       <label className="label">Link task (optional)</label>
                       <select value={focusTaskId} onChange={(event) => setFocusTaskId(event.target.value)}>
                         <option value="">No linked task</option>
@@ -1240,6 +1545,14 @@ export default function App(): JSX.Element {
             <article className="panel">
               <h3>Rank + Progression</h3>
               <p className="lead-text">Current rank: {rankFromLevel(level)}</p>
+              <div className="xp-mini">
+                <div className="xp-mini-track">
+                  <span style={{ width: `${xpProgress}%` }} />
+                </div>
+                <small>
+                  XP to next level: {xpCurrent}/{xpNeeded}
+                </small>
+              </div>
               <p className="muted">XP lifetime: {character?.xpLifetime ?? 0}</p>
               <p className="muted">Season cap: {character?.seasonCap ?? 60}</p>
               <p className="muted">Task streak: {streaks?.taskDays ?? 0} days</p>
@@ -1327,16 +1640,23 @@ export default function App(): JSX.Element {
                         return <span key={`blank-${idx}`} className="heat blank" />;
                       }
                       return (
-                        <span
+                        <button
+                          type="button"
                           key={cell.date}
                           className={`heat lvl-${heatLevel(cell.minutes)}`}
                           title={`${cell.date}: ${cell.minutes} min`}
+                          aria-label={`${cell.date}: ${cell.minutes} focus minutes`}
+                          aria-pressed={selectedHeatCell?.date === cell.date}
+                          onClick={() => setSelectedHeatCell(cell)}
                         />
                       );
                     })}
                   </div>
                 </div>
               </div>
+              <p className="muted" style={{ marginTop: "0.45rem" }}>
+                {selectedHeatCell ? `${selectedHeatCell.date} • ${selectedHeatCell.minutes} min` : "Click a day to view date and focus time."}
+              </p>
             </article>
 
             <div className="analytics-right">
@@ -1433,6 +1753,22 @@ export default function App(): JSX.Element {
               <p className="muted">Aggregate-only preview for future guild and party features.</p>
               <button onClick={runSnapshot}>Build Snapshot (Local)</button>
               {snapshotPreview && <pre>{snapshotPreview}</pre>}
+            </article>
+            <article className="panel">
+              <h3>Theme</h3>
+              <p className="muted">Switch the UI palette instantly.</p>
+              <select
+                value={activeThemeId}
+                onChange={(event) => {
+                  void updateSettings({ themeId: event.target.value as NonNullable<AppSettings["themeId"]> });
+                }}
+              >
+                {themeOptions.map((theme) => (
+                  <option key={theme.id} value={theme.id}>
+                    {theme.label}
+                  </option>
+                ))}
+              </select>
             </article>
             <article className="panel">
               <h3>Current Timer Profile</h3>

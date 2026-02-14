@@ -107,6 +107,7 @@ export const defaultSettings: AppSettings = {
     longBreakMin: 15,
     everyN: 4
   },
+  themeId: "neon",
   staminaEnabled: false,
   audioEnabled: true,
   reducedMotion: false

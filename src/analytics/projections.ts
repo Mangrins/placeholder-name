@@ -53,7 +53,7 @@ export async function completionRateOnFocusDays(): Promise<number> {
 }
 
 export async function peakHourDistribution(): Promise<number[]> {
-  const sessions = (await db.focusSessions.toArray()).filter((session) => session.completed);
+  const sessions = (await db.focusSessions.toArray()).filter((session) => session.type === "work");
   const histogram = Array.from({ length: 24 }, () => 0);
 
   sessions.forEach((s) => {
@@ -65,7 +65,7 @@ export async function peakHourDistribution(): Promise<number[]> {
 }
 
 export async function peakDayDistribution(): Promise<number[]> {
-  const sessions = await db.focusSessions.toArray();
+  const sessions = (await db.focusSessions.toArray()).filter((session) => session.type === "work");
   const histogram = Array.from({ length: 7 }, () => 0);
 
   sessions.forEach((s) => {
