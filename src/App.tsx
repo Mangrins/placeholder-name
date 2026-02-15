@@ -154,15 +154,15 @@ export default function App() {
 
   const commandItems = useMemo<CommandItem[]>(() => {
     const navCommands = [
-      { id: "dashboard", label: "Dashboard", icon: "⚔" },
-      { id: "tasks", label: "Tasks", icon: "☑" },
+      { id: "dashboard", label: "Dashboard", icon: "🏠" },
+      { id: "tasks", label: "Tasks", icon: "✅" },
       { id: "focus", label: "Focus", icon: "⌛" },
       { id: "quests", label: "Quests", icon: "🗺" },
       { id: "character", label: "Character", icon: "🛡" },
       { id: "achievements", label: "Badges", icon: "🏆" },
       { id: "analytics", label: "Analytics", icon: "📈" },
       { id: "journal", label: "Journal", icon: "✎" },
-      { id: "settings", label: "Settings", icon: "⚙" },
+      { id: "settings", label: "Settings", icon: "🛠️" },
     ].map((item) => ({
       id: `nav-${item.id}`,
       label: `Go to ${item.label}`,
@@ -238,7 +238,7 @@ export default function App() {
 
   const level = character?.level ?? 1;
   const xpCurrent = character?.xpCurrent ?? 0;
-  const xpNeeded = 100; // Simplified
+  const xpNeeded = xpToNext(level);
   const xpProgress =
     xpNeeded > 0
       ? Math.max(0, Math.min(100, Math.round((xpCurrent / xpNeeded) * 100)))
@@ -246,6 +246,39 @@ export default function App() {
   const unlockedBadges = achievements.filter(
     (achievement) => !!achievementProgress[achievement.id]?.unlockedAt,
   ).length;
+  const rankTier =
+    level >= 50
+      ? "S"
+      : level >= 40
+        ? "A"
+        : level >= 30
+          ? "B"
+          : level >= 20
+            ? "C"
+            : level >= 10
+              ? "D"
+              : "E";
+  const rankHeader = `${rankTier}-Rank ${rankFromLevel(level)}`.toUpperCase();
+  const heroAttributes = [
+    { label: "Strength", value: character?.stats.strength ?? 0, icon: "⚔" },
+    { label: "Vitality", value: character?.stats.vitality ?? 0, icon: "❤" },
+    {
+      label: "Intellect",
+      value: character?.stats.intellect ?? 0,
+      icon: "✦",
+    },
+    {
+      label: "Creativity",
+      value: character?.stats.creativity ?? 0,
+      icon: "✎",
+    },
+    {
+      label: "Discipline",
+      value: character?.stats.discipline ?? 0,
+      icon: "⌘",
+    },
+    { label: "Social", value: character?.stats.social ?? 0, icon: "☺" },
+  ];
 
   return (
     <div className="app-shell">
@@ -270,15 +303,15 @@ export default function App() {
         )}
         <nav>
           {[
-            { id: "dashboard", label: "Dashboard", icon: "⚔" },
-            { id: "tasks", label: "Tasks", icon: "☑" },
+            { id: "dashboard", label: "Dashboard", icon: "🏠" },
+            { id: "tasks", label: "Tasks", icon: "✅" },
             { id: "focus", label: "Focus", icon: "⌛" },
             { id: "quests", label: "Quests", icon: "🗺" },
             { id: "character", label: "Character", icon: "🛡" },
             { id: "achievements", label: "Badges", icon: "🏆" },
             { id: "analytics", label: "Analytics", icon: "📈" },
             { id: "journal", label: "Journal", icon: "✎" },
-            { id: "settings", label: "Settings", icon: "⚙" },
+            { id: "settings", label: "Settings", icon: "🛠️" },
           ].map((tab) => (
             <button
               key={tab.id}
@@ -303,80 +336,33 @@ export default function App() {
         {!focusTab.immersiveFocusMode && (
           <section className="panel hero">
             <div className="hero-content">
-              <h1>RPG Productivity</h1>
+              <h1>{rankHeader}</h1>
               <p>
-                Level up your productivity with gamified task management and
-                focus sessions.
+                Level {level} • Prestige 0 • Lifetime XP{" "}
+                {character?.xpLifetime ?? 0}
               </p>
-              <div className="hero-stats">
-                <div className="stat">
-                  <span className="stat-value">{level}</span>
-                  <span className="stat-label">Level</span>
+              <div className="hero-xp">
+                <div className="xp-mini-track">
+                  <span style={{ width: `${xpProgress}%` }} />
                 </div>
-                <div className="stat">
-                  <span className="stat-value">{xpCurrent}</span>
-                  <span className="stat-label">XP</span>
-                  <div className="xp-bar">
-                    <div
-                      className="xp-bar-track"
-                      style={{
-                        width: `${(xpCurrent / xpToNext(level)) * 100}%`,
-                      }}
-                    ></div>
-                  </div>
-                </div>
-                <div className="stat">
-                  <span className="stat-value">{unlockedBadges}</span>
-                  <span className="stat-label">Badges</span>
-                </div>
-                <div className="stat">
-                  <span className="stat-value">{analyticsTab.weeklyFocus}</span>
-                  <span className="stat-label">Weekly Focus</span>
-                </div>
-                <div className="stat">
-                  <span className="stat-value">
-                    {analyticsTab.weeklyCompletions}
-                  </span>
-                  <span className="stat-label">Weekly Tasks</span>
-                </div>
+                <small>
+                  Rank XP {xpCurrent}/{xpNeeded}
+                </small>
               </div>
-              <div className="hero-character-stats">
-                <div className="stat">
-                  <span className="stat-value">
-                    {character?.stats.strength || 0}
-                  </span>
-                  <span className="stat-label">Strength</span>
-                </div>
-                <div className="stat">
-                  <span className="stat-value">
-                    {character?.stats.intellect || 0}
-                  </span>
-                  <span className="stat-label">Intelligence</span>
-                </div>
-                <div className="stat">
-                  <span className="stat-value">
-                    {character?.stats.vitality || 0}
-                  </span>
-                  <span className="stat-label">Vitality</span>
-                </div>
-                <div className="stat">
-                  <span className="stat-value">
-                    {character?.stats.creativity || 0}
-                  </span>
-                  <span className="stat-label">Creativity</span>
-                </div>
-                <div className="stat">
-                  <span className="stat-value">
-                    {character?.stats.discipline || 0}
-                  </span>
-                  <span className="stat-label">Discipline</span>
-                </div>
-                <div className="stat">
-                  <span className="stat-value">
-                    {character?.stats.social || 0}
-                  </span>
-                  <span className="stat-label">Social</span>
-                </div>
+              <div className="hero-attribute-grid">
+                {heroAttributes.map((attribute) => (
+                  <div key={attribute.label} className="hero-attribute-card">
+                    <div className="hero-attribute-label">{attribute.label}</div>
+                    <div className="hero-attribute-value-row">
+                      <span className="hero-attribute-value">
+                        {attribute.value}
+                      </span>
+                      <span className="hero-attribute-icon" aria-hidden="true">
+                        {attribute.icon}
+                      </span>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           </section>
@@ -517,11 +503,7 @@ export default function App() {
             focusDayCompletionRate={analyticsTab.focusDayCompletionRate}
             peakHourIndex={analyticsTab.peakHourIndex}
             streaks={streaks}
-            unlockedBadges={
-              achievements.filter(
-                (a) => !!achievementProgress[a.id]?.unlockedAt,
-              ).length
-            }
+            unlockedBadges={unlockedBadges}
             achievements={achievements}
           />
         )}
@@ -546,11 +528,7 @@ export default function App() {
 
         {activeTab === "achievements" && (
           <AchievementsTab
-            unlockedBadges={
-              achievements.filter(
-                (a) => !!achievementProgress[a.id]?.unlockedAt,
-              ).length
-            }
+            unlockedBadges={unlockedBadges}
             achievements={achievements}
             achievementProgress={achievementProgress}
             progressPercent={(progress, target) =>
