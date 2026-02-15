@@ -62,6 +62,14 @@ export default function App() {
     init();
   }, [init]);
 
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.documentElement.setAttribute(
+      "data-theme",
+      settings?.themeId ?? "neon",
+    );
+  }, [settings?.themeId]);
+
   const timerSettings = settings?.timer ?? {
     workMin: 25,
     breakMin: 5,
